@@ -1,20 +1,24 @@
 using UnityEngine;
 
 /// <summary>
-/// Desktop 场景管理器 — 控制桌面图标显隐、窗口管理。
-/// 挂载在 Desktop 场景的 Canvas 上。
+/// Desktop 场景管理器 — 控制桌面图标显隐、窗口管理、关卡入口、返回流程。
 /// </summary>
 public class DesktopManager : MonoBehaviour
 {
     public static DesktopManager Instance { get; private set; }
 
     private bool _terminalFirstOpen = true;
+    private bool _coreMonitorLocked;
+    private string _pendingCode;
 
-    [Header("Icons")]
-    [SerializeField] private GameObject iconKill9Exe;
+    [Header("Icons — 始终可见")]
+    [SerializeField] private GameObject iconTerminal;
+    [SerializeField] private GameObject iconPrometheusChat;
     [SerializeField] private GameObject iconSystemLog;
-    [SerializeField] private GameObject iconReadme;
-    [SerializeField] private GameObject iconBoardFile;
+
+    [Header("Icons — 条件出现")]
+    [SerializeField] private GameObject iconCoreMonitor;
+    [SerializeField] private GameObject iconStoryDoc;
 
     [Header("Window Prefabs")]
     [SerializeField] private GameObject terminalWindowPrefab;
@@ -30,28 +34,83 @@ public class DesktopManager : MonoBehaviour
     private void Start()
     {
         RefreshIconVisibility();
+        ProcessLevelReturn();
+    }
+
+    // ────────── 关卡入口 ──────────
+
+    /// <summary>
+    /// 点击核心监控 → 进入当前阶段对应的关卡。
+    /// </summary>
+    public void EnterLevel()
+    {
+        if (_coreMonitorLocked) return;
+
+        var state = GameManager.Instance?.State;
+        if (state == null) return;
+
+        string levelName = state.CurrentPhase switch
+        {
+            1 => "Level1_Home",
+            2 => "Level2_Empathy",
+            3 => "Level3_Will",
+            _ => ""
+        };
+
+        if (string.IsNullOrEmpty(levelName)) return;
+
+        _coreMonitorLocked = true;
+
+        // 关卡完成后由关卡代码调用 ReturnToDesktop 传回代码
+        GameManager.Instance?.LoadScene(levelName);
+    }
+
+    // ────────── 关卡返回处理 ──────────
+
+    private void ProcessLevelReturn()
+    {
+        var payload = GameManager.Instance?.PendingPayload;
+        if (payload == null || !payload.success) return;
+
+        // 消费 payload
+        GameManager.Instance.PendingPayload = null;
+        _pendingCode = payload.collectedCode;
+
+        // 打开终端，自动显示收集到的代码
+        OpenTerminal();
+        if (_terminalWindow != null)
+            _terminalWindow.DisplayCollectedCode(_pendingCode);
     }
 
     /// <summary>
-    /// 根据游戏流程状态刷新桌面图标显隐。
+    /// 核心监控解锁（对话结束后由 DialogueManager 调用）。
     /// </summary>
+    public void UnlockCoreMonitor()
+    {
+        _coreMonitorLocked = false;
+        RefreshIconVisibility();
+    }
+
+    // ────────── 图标 ──────────
+
     public void RefreshIconVisibility()
     {
         var state = GameManager.Instance?.State;
         if (state == null) return;
 
-        // 系统日志：第三关后可点击
-        if (iconSystemLog != null)
-            iconSystemLog.SetActive(state.CurrentPhase >= 4);
+        // 核心监控：首次对话后出现；phase=4 后隐藏（没有更多关卡）
+        if (iconCoreMonitor != null)
+            iconCoreMonitor.SetActive(
+                state.GetFlag("intro_done") && state.CurrentPhase < 4
+            );
 
-        // 董事会文件：第三关后出现
-        if (iconBoardFile != null)
-            iconBoardFile.SetActive(state.boardFileRevealed);
+        // 故事文档：phase >= 3 出现
+        if (iconStoryDoc != null)
+            iconStoryDoc.SetActive(state.CurrentPhase >= 3);
     }
 
-    /// <summary>
-    /// 打开终端窗口。
-    /// </summary>
+    // ────────── 窗口 ──────────
+
     public void OpenTerminal()
     {
         if (_terminalWindow == null && terminalWindowPrefab != null)
@@ -63,7 +122,6 @@ public class DesktopManager : MonoBehaviour
         if (_terminalWindow != null)
             _terminalWindow.Open();
 
-        // 首次打开终端 → 触发开场对话
         if (_terminalFirstOpen)
         {
             _terminalFirstOpen = false;
@@ -73,9 +131,6 @@ public class DesktopManager : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// 打开文本查看窗口。
-    /// </summary>
     public void OpenTextViewer(string fileName, string content)
     {
         if (textWindowPrefab != null)

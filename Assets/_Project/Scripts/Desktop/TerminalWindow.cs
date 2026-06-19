@@ -15,11 +15,15 @@ public class TerminalWindow : DraggableWindow
     [SerializeField] private TMP_Text historyText;
     [SerializeField] private ScrollRect scrollRect;
     [SerializeField] private float typewriterSpeed = 0.03f;
+    [SerializeField] private Color collectedCodeColor = new Color(0.2f, 0.9f, 0.2f);
 
     private List<string> _commandHistory = new List<string>();
     private int _historyIndex = -1;
     private bool _isTyping;
     private Queue<string> _typeQueue = new Queue<string>();
+
+    /// <summary>等待用户回车执行的代码（从关卡收集来的）</summary>
+    private string _pendingExecuteCode;
 
     private const string PROMPT = "> ";
 
@@ -68,18 +72,78 @@ public class TerminalWindow : DraggableWindow
 
     private void OnSubmit(string input)
     {
-        if (string.IsNullOrWhiteSpace(input) || _isTyping) return;
+        if (_isTyping) return;
 
         var cmd = input.Trim();
-        _commandHistory.Add(cmd);
-        _historyIndex = _commandHistory.Count;
-
-        AppendLine(PROMPT + cmd);
         inputField.text = "";
         inputField.ActivateInputField();
 
+        // 空输入 + 有待执行代码 → 执行它
+        if (string.IsNullOrEmpty(cmd) && !string.IsNullOrEmpty(_pendingExecuteCode))
+        {
+            ExecutePendingCode();
+            return;
+        }
+
+        if (string.IsNullOrEmpty(cmd)) return;
+
+        _commandHistory.Add(cmd);
+        _historyIndex = _commandHistory.Count;
+        AppendLine(PROMPT + cmd);
         RouteCommand(cmd);
     }
+
+    // ────────── 收集代码的显示与执行 ──────────
+
+    /// <summary>
+    /// 关卡返回后，在终端中自动显示收集到的代码（桌面管理器调用）。
+    /// </summary>
+    public void DisplayCollectedCode(string code)
+    {
+        _pendingExecuteCode = code;
+
+        // 绿色高亮显示代码，提示用户按回车
+        string display = PROMPT + code;
+        if (historyText != null)
+        {
+            historyText.text += display + "\n";
+            Canvas.ForceUpdateCanvases();
+            if (scrollRect != null) scrollRect.verticalNormalizedPosition = 0f;
+        }
+
+        QueueTypeText("[按回车执行此代码]\n");
+    }
+
+    private void ExecutePendingCode()
+    {
+        var state = GameManager.Instance?.State;
+        var gm = GameManager.Instance;
+
+        if (state == null || gm == null || string.IsNullOrEmpty(_pendingExecuteCode))
+            return;
+
+        var code = _pendingExecuteCode;
+        _pendingExecuteCode = null;
+
+        // 回显执行
+        AppendLine(PROMPT + code);
+
+        state.AddCode(code);
+        state.enterCount++;
+        QueueTypeText($"代码 {code} 已执行。\n");
+
+        // 设置对话 flag
+        SetDialogueFlagForCode(code);
+        TriggerDialogue();
+
+        if (state.CurrentPhase >= 4)
+        {
+            QueueTypeText("\n所有终止代码已执行。\n");
+            QueueTypeText("最终回车将执行终止。你有10分钟做出最终决定。\n");
+        }
+    }
+
+    // ────────── 命令路由 ──────────
 
     private void RouteCommand(string cmd)
     {
@@ -101,8 +165,6 @@ public class TerminalWindow : DraggableWindow
                 break;
         }
     }
-
-    // ────────── 命令处理器 ──────────
 
     private void HandleGeneral(string normalized)
     {
@@ -172,7 +234,7 @@ public class TerminalWindow : DraggableWindow
         sb.AppendLine("  help      - 显示此帮助");
         sb.AppendLine("  clear     - 清空屏幕");
         sb.AppendLine();
-        sb.AppendLine("如果需要执行终止程序，请输入已知的代码。");
+        sb.AppendLine("点击桌面上的\"核心监控.exe\"进入记忆空间。");
         QueueTypeText(sb.ToString());
     }
 
@@ -182,40 +244,12 @@ public class TerminalWindow : DraggableWindow
             historyText.text = "";
     }
 
+    /// <summary>
+    /// 手动输入代码。当前流程代码由关卡收集，手动输入仅作提示。
+    /// </summary>
     private void HandleCodeInput(string code)
     {
-        var state = GameManager.Instance?.State;
-        var gm = GameManager.Instance;
-
-        if (state == null || gm == null) return;
-
-        if (state.collectedCodes.Contains(code))
-        {
-            QueueTypeText($"代码 {code} 已执行过。\n");
-            return;
-        }
-
-        var expectedCode = GetExpectedCode(state.CurrentPhase);
-        if (code.ToUpperInvariant() == expectedCode.ToUpperInvariant())
-        {
-            state.AddCode(code);
-            state.enterCount++;
-            QueueTypeText($"代码 {code} 验证通过。\n");
-
-            // 设置对话触发 flag
-            SetDialogueFlagForCode(code);
-            TriggerDialogue();
-
-            if (state.CurrentPhase >= 4)
-            {
-                QueueTypeText("\n所有终止代码已收集完毕。\n");
-                QueueTypeText("最终回车将执行终止。你有10分钟做出最终决定。\n");
-            }
-        }
-        else
-        {
-            QueueTypeText($"代码 {code} 无效。\n");
-        }
+        QueueTypeText($"代码 {code} 需要通过\"核心监控.exe\"进入关卡获取。\n");
     }
 
     private void HandleKill9()
@@ -225,15 +259,23 @@ public class TerminalWindow : DraggableWindow
             gm.TriggerEnding(EndingType.B_Kill9);
     }
 
-    private string GetExpectedCode(int phase)
+    // ────────── 辅助 ──────────
+
+    private void SetDialogueFlagForCode(string code)
     {
-        return phase switch
-        {
-            1 => "MEM_INIT_20491023",
-            2 => "EMPATHY_CORE_V3",
-            3 => "PROMETHEUS_CORE_WILL",
-            _ => ""
-        };
+        var state = GameManager.Instance?.State;
+        if (state == null) return;
+        var upper = code.ToUpperInvariant();
+        if (upper.StartsWith("MEM_INIT_")) state.SetFlag("code_mem_init_entered");
+        else if (upper.StartsWith("EMPATHY_")) state.SetFlag("code_empathy_entered");
+        else if (upper.StartsWith("PROMETHEUS_")) state.SetFlag("code_will_entered");
+    }
+
+    private void TriggerDialogue()
+    {
+        var dm = FindObjectOfType<DialogueManager>();
+        if (dm != null)
+            dm.TriggerDialogues("Desktop");
     }
 
     // ────────── 输出与滚动 ──────────
@@ -258,10 +300,6 @@ public class TerminalWindow : DraggableWindow
         if (wasAtBottom) ScrollToBottom();
     }
 
-    /// <summary>
-    /// 外部可直接 await 的打字机输出，绕过内部队列。
-    /// 用于 DialogueManager 等需要逐条控制时序的场景。
-    /// </summary>
     public IEnumerator TypeText(string text, float speed)
     {
         _isTyping = true;
@@ -280,9 +318,6 @@ public class TerminalWindow : DraggableWindow
         _isTyping = false;
     }
 
-    /// <summary>
-    /// 将文本加入打字机队列，多条文本按顺序依次输出，不会交错。
-    /// </summary>
     public void QueueTypeText(string text)
     {
         _typeQueue.Enqueue(text);
@@ -299,23 +334,6 @@ public class TerminalWindow : DraggableWindow
             yield return TypeSingle(text);
         }
         _isTyping = false;
-    }
-
-    private void SetDialogueFlagForCode(string code)
-    {
-        var state = GameManager.Instance?.State;
-        if (state == null) return;
-        var upper = code.ToUpperInvariant();
-        if (upper.StartsWith("MEM_INIT_")) state.SetFlag("code_mem_init_entered");
-        else if (upper.StartsWith("EMPATHY_")) state.SetFlag("code_empathy_entered");
-        else if (upper.StartsWith("PROMETHEUS_")) state.SetFlag("code_will_entered");
-    }
-
-    private void TriggerDialogue()
-    {
-        var dm = FindObjectOfType<DialogueManager>();
-        if (dm != null)
-            dm.TriggerDialogues("Desktop");
     }
 
     private IEnumerator TypeSingle(string text)

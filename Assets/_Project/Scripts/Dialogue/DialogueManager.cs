@@ -75,9 +75,31 @@ public class DialogueManager : MonoBehaviour
         {
             var d = _pendingQueue.Dequeue();
             yield return ShowDialogue(d, display);
+
+            // 每条对话播完后重新扫描，捕捉被 onComplete flag 解锁的新对话
+            var state = GameManager.Instance?.State;
+            if (state != null)
+            {
+                var more = _allDialogues
+                    .Where(line => !_playedIds.Contains(line.id))
+                    .Where(line => line.triggerScene == d.triggerScene || string.IsNullOrEmpty(line.triggerScene))
+                    .Where(line => string.IsNullOrEmpty(line.triggerCondition) || state.GetFlag(line.triggerCondition))
+                    .Where(line => line.triggerEnterCount < 0 || state.enterCount >= line.triggerEnterCount)
+                    .OrderByDescending(line => line.priority);
+
+                foreach (var line in more)
+                {
+                    _pendingQueue.Enqueue(line);
+                    if (line.playOnce)
+                        _playedIds.Add(line.id);
+                }
+            }
         }
 
         _isShowing = false;
+
+        // 本轮对话全部结束 → 解锁核心监控
+        DesktopManager.Instance?.UnlockCoreMonitor();
     }
 
     private IEnumerator ShowDialogue(DialogueLine d, DialogueDisplay display)
@@ -103,9 +125,12 @@ public class DialogueManager : MonoBehaviour
             yield return new WaitForSeconds(1f);
         }
 
-        // 完成回调：设置 flag
+        // 完成回调：设置 flag + 刷新桌面图标
         if (!string.IsNullOrEmpty(d.onComplete) && state != null)
+        {
             state.SetFlag(d.onComplete);
+            DesktopManager.Instance?.RefreshIconVisibility();
+        }
     }
 
     private DialogueDisplay FindActiveDisplay()
